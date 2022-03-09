@@ -3,8 +3,8 @@ from pyteal import *
 def approval_program():
     
     # Global States
-    token_name = Bytes("token_name")
-    token_address = Bytes("token_address")
+    staking_token = Bytes("staking_token")
+    reward_token = Bytes("reward_token")
     total_supply = Bytes("total_supply")
     staking_starts = Bytes("staking_starts")
     staking_ends = Bytes("staking_ends")
@@ -57,8 +57,8 @@ def approval_program():
         return Log(Concat(Bytes("staked { token: "), convert_uint_to_bytes(token), Bytes(", requested_amount: "), convert_uint_to_bytes(requested_amount), Bytes(", staked_amount: "), convert_uint_to_bytes(staked_amount), Bytes("}") ))
 
     @Subroutine(TealType.none)
-    def paid_out(token: TealType. uint64, amount: TealType.uint64, reward: TealType.uint64):
-        return Log(Concat(Bytes("paid_out { token: "), convert_uint_to_bytes(token), Bytes(", amount: "), convert_uint_to_bytes(amount), Bytes(", reward: "), convert_uint_to_bytes(reward), Bytes("}") ))
+    def paid_out(stake: TealType. uint64, reward: TealType. uint64, amount: TealType.uint64, rewardAmt: TealType. uint64):
+        return Log(Concat(Bytes("paid_out { token: "), convert_uint_to_bytes(stake), convert_uint_to_bytes(reward), Bytes(", amount: "), convert_uint_to_bytes(amount), Bytes(", reward: "), convert_uint_to_bytes(rewardAmt), Bytes("}") ))
 
     @Subroutine(TealType.none)
     def refunded(token: TealType. uint64, amount: TealType.uint64):
@@ -117,11 +117,11 @@ def approval_program():
             before(App.globalGet(staking_ends)),
             positive(amount),
             # Verify that staker has transfered assets to the application
-            is_asset_transfered(App.globalGet(token_address), amount),
+            is_asset_transfered(App.globalGet(staking_token), amount),
 
             # If the amount to be staked is > total staking cap
-            If(amount > (App.globalGet(staking_total) - amount),
-                remaining_token.store(App.globalGet(staking_total) - amount),
+            If(amount > (App.globalGet(staking_total) - App.globalGet(staked_balance)),
+                remaining_token.store(App.globalGet(staking_total) - App.globalGet(staked_balance)),
                 remaining_token.store(amount)
             ),
 
@@ -133,8 +133,8 @@ def approval_program():
 
             If(remaining_token.load() < amount,
                 Seq([
-                    execute_asset_transfer(App.globalGet(token_address), amount - remaining_token.load(), Txn.sender()),
-                    refunded(App.globalGet(token_address), amount - remaining_token.load()),
+                    execute_asset_transfer(App.globalGet(staking_token), amount - remaining_token.load(), Txn.sender()),
+                    refunded(App.globalGet(staking_token), amount - remaining_token.load()),
                 ])
             ),
 
@@ -142,7 +142,7 @@ def approval_program():
             App.globalPut(staked_balance, (App.globalGet(staked_balance) + remaining_token.load())),
             App.localPut(Txn.sender(), stakes, App.localGet(Txn.sender(), stakes) + remaining_token.load()),
 
-            staked(App.globalGet(token_address), amount, remaining_token.load()),
+            staked(App.globalGet(staking_token), amount, remaining_token.load()),
 
         ])
 
@@ -156,17 +156,31 @@ def approval_program():
             # This is the formula to calculate reward:
             # r = (earlyWithdrawReward / stakedTotal) * (block.timestamp - stakingEnds) / (withdrawEnds - stakingEnds)
             # w = (1+r) * a
-            denom.store((App.globalGet(withdraw_ends) - App.globalGet(staking_ends)) * App.globalGet(staked_balance)),
+            denom.store((App.globalGet(withdraw_ends) - App.globalGet(staking_ends)) * App.globalGet(staked_total)),
             reward.store(((Global.latest_timestamp() - App.globalGet(staking_ends)) * App.globalGet(early_withdraw_rewards) * amount) / denom.load()),
-            pay_out.store(amount + reward.load()),
-
+            
+            # Add Condition to Check if its Traditional/LP Staking 
+            If(App.globalGet(staking_token) == App.globalGet(reward_token))
+                .Then(
+                    Seq([
+                        pay_out.store(amount + reward.load()),
+                        # Transfer tokens to the withdrawer
+                        execute_asset_transfer(App.globalGet(staking_token), pay_out.load(), from_address),
+                        paid_out(App.globalGet(staking_token), App.globalGet(reward_token), amount, reward.load()),
+                    ])
+                )
+                .Else(
+                    Seq([
+                        # Transfer stake & reward tokens to the withdrawer
+                        execute_asset_transfer(App.globalGet(staking_token), amount, from_address),
+                        execute_asset_transfer(App.globalGet(reward_token), reward.load(), from_address),
+                        paid_out(App.globalGet(staking_token), App.globalGet(reward_token), amount, reward.load()),
+                    ])
+                ),
+            
             App.globalPut(reward_balance, App.globalGet(reward_balance) - reward.load()),
             App.globalPut(staked_balance, App.globalGet(staked_balance) - amount),
             App.localPut(from_address, stakes, App.localGet(from_address, stakes) - amount),
-            
-            # Transfer tokens to the withdrawer
-            execute_asset_transfer(App.globalGet(token_address), pay_out.load(), from_address),
-            paid_out(App.globalGet(token_address), amount, reward.load()),
         ])
 
     @Subroutine(TealType.none)
@@ -175,16 +189,30 @@ def approval_program():
         reward = ScratchVar(TealType.uint64)
         pay_out = ScratchVar(TealType.uint64)
         return Seq([
-            reward.store((App.globalGet(reward_balance) * amount) / App.globalGet(staked_total)),
-            pay_out.store(amount + reward.load()),
+            reward.store((App.globalGet(reward_balance) * amount) / App.globalGet(staked_balance)),
+
+            # Add Condition to Check if its Traditional/LP Staking 
+            If(App.globalGet(staking_token) == App.globalGet(reward_token))
+                .Then(
+                    Seq([
+                        pay_out.store(amount + reward.load()),
+                        # Transfer tokens to the withdrawer
+                        execute_asset_transfer(App.globalGet(staking_token), pay_out.load(), from_address),
+                         paid_out(App.globalGet(staking_token), App.globalGet(reward_token), amount, reward.load()),
+                    ])
+                )
+                .Else(
+                    Seq([
+                        # Transfer stake & reward tokens to the withdrawer
+                        execute_asset_transfer(App.globalGet(staking_token), amount, from_address),
+                        execute_asset_transfer(App.globalGet(reward_token), reward.load(), from_address),
+                         paid_out(App.globalGet(staking_token), App.globalGet(reward_token), amount, reward.load()),
+                    ])
+                ),
 
             App.globalPut(reward_balance, App.globalGet(reward_balance) - reward.load()),
             App.globalPut(staked_balance, App.globalGet(staked_balance) - amount),
             App.localPut(from_address, stakes, App.localGet(from_address, stakes) - amount),
-
-            # Transfer tokens to the withdrawer
-            execute_asset_transfer(App.globalGet(token_address), pay_out.load(), from_address),
-            paid_out(App.globalGet(token_address), amount, reward.load()),
         ])
 
     @Subroutine(TealType.none)
@@ -216,7 +244,7 @@ def approval_program():
             Assert(withdrawable_amount <= reward_amount),
 
             # verifying that the sender has transfered the assets to the application
-            is_asset_transfered(App.globalGet(token_address), reward_amount),
+            is_asset_transfered(App.globalGet(reward_token), reward_amount),
 
             App.globalPut(total_rewards, App.globalGet(total_rewards) + reward_amount),
             App.globalPut(reward_balance, App.globalGet(total_rewards)),
@@ -226,8 +254,9 @@ def approval_program():
     is_application_admin = Assert(Txn.sender() == App.globalGet(application_admin))
 
     # CONSTRUCTOR
-    _token_name = Txn.application_args[0]
-    _token_address = Btoi(Txn.application_args[1])
+    
+    _staking_token = Btoi(Txn.application_args[0])
+    _reward_token = Btoi(Txn.application_args[1])
     _staking_starts = Btoi(Txn.application_args[2])
     _staking_ends = Btoi(Txn.application_args[3])
     _withdraw_starts = Btoi(Txn.application_args[4])
@@ -237,8 +266,8 @@ def approval_program():
 
     on_creation = Seq([
         Assert(Global.group_size() == Int(1)),
-        App.globalPut(token_name, _token_name),
-        App.globalPut(token_address, _token_address),
+        App.globalPut(staking_token, _staking_token),
+        App.globalPut(reward_token, _reward_token),
         App.globalPut(application_admin, Txn.sender()),
 
         # Exception('Festaking: zero staking start time'),
@@ -272,7 +301,9 @@ def approval_program():
     on_setup = Seq(
         is_application_admin,
         # OPT-IN to Token from Application. 
-        execute_asset_transfer(App.globalGet(token_address), Int(0), Global.current_application_address()),
+        execute_asset_transfer(App.globalGet(staking_token), Int(0), Global.current_application_address()),
+        # OPT-IN to Reward Token from Application.
+        execute_asset_transfer(App.globalGet(reward_token), Int(0), Global.current_application_address()),
         Approve(),
     )
 
