@@ -188,7 +188,9 @@ library FestakedLib {
         uint256 reward = (
         ( (now.sub(stakingEnds)).mul(rewardState.earlyWithdrawReward) ).mul(amount)
         ).div(denom);
+        
         rewardState.rewardBalance = rewardState.rewardBalance.sub(reward);
+
         bool principalPaid = _payDirect(from, amount, tokenAddress);
         bool rewardPaid = _payDirect(from, reward, rewardTokenAddress);
         require(principalPaid && rewardPaid, "Festaking: error paying");
