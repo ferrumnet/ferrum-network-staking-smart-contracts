@@ -365,7 +365,7 @@ def approval_program():
         # Reject DELETE and UPDATE Application Calls.
         [Txn.on_completion() == OnComplete.DeleteApplication, on_delete],
         [Txn.on_completion() == OnComplete.UpdateApplication, on_update],
-
+        #
         # Users should OPT-IN to Application to allow Application to use LocalStorage of the user.
         [
             Or(
